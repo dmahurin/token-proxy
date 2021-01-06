@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+
+const dns2 = require('dns2');
+
+const dns = require('dns');
+const fs = require("fs");
+const ip = require("ip");
+
+const Token = require('./token.js');
+dns.setServers(['8.8.8.8']);
+
+const { Packet } = dns2;
+
+var end_time = Date.now() / 1000;
+
+const server = dns2.createServer((request, send, rinfo) => {
+	const response = Packet.createResponseFromRequest(request);
+	const [ question ] = request.questions;
+	const { name } = question;
+	if(name == 'token') {
+		response.answers.push({
+			name,
+			type: Packet.TYPE.A,
+			class: Packet.CLASS.IN,
+			ttl: 300,
+			address: ip.address()
+		});
+		send(response);
+		return;
+	}
+	if(Date.now() / 1000 > end_time) {
+console.log('out of time ' + name);
+		response.header.rcode = 3;
+		send(response);
+		return;
+	}
+
+	dns.resolve(name, (err, records) => {
+		response.answers.push({
+			name,
+			type: Packet.TYPE.A,
+			class: Packet.CLASS.IN,
+			ttl: 300,
+			address: records[0]
+		});
+		send(response);
+	});
+});
+
+server.listen(53);
+
+const http = require('http');
+
+function process_query(query, res) {
+	const now = Date.now()/1000;
+	res.writeHead( 200, {'Content-Type': 'text/html', 'Cache-Control': 'no-cache'});
+	res.write("<html><body><h1>Login</h1>\n");
+		var token = query.indexOf('=');
+		if(token > 0) {
+			token = Number(query.substring(token+1));
+			var n = Token.redeem(token);
+
+			if(n) {
+				end_time = now > end_time ? now : end_time;
+				res.write("token added " + n/60 + " minutes<br>");
+				end_time += n;
+			} else if(n === 0) {
+				res.write("token expired" + "<br>");
+			} else {
+				res.write("invalid token<br>");
+			}
+		}
+
+		var remaining = Math.floor(((now > end_time) ? 0 : end_time - now)/60);
+
+		res.write(
+			"Time remaining: " + remaining + '<br>' +
+			'<form method="post"><input type="text" id="number" name="number"><br>' +
+			'<input type="submit" value="Submit">' +
+			'</form></body></html>' +
+			"</body></html>\r\n"
+		);
+		res.end();
+}
+
+http.createServer(function (req, res) {
+	if (req.method == 'POST') {
+		var body = '';
+
+		req.on('data', (data) => { body += data; });
+
+		req.on('end', () => {
+			process_query(body, res);
+		});
+	} else {
+		process_query(req.url, res);
+	}
+}).listen(8080);
+
+/* vim: set ts=2 sw=2 tw=0 noet: */

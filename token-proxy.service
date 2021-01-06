@@ -1,0 +1,11 @@
+[Unit]
+Description=Token Proxy
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/token-proxy
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
