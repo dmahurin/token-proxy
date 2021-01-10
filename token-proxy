@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const dns2 = require('dns2');
+var net = require('net');
 
 const dns = require('dns');
 const fs = require("fs");
@@ -13,7 +14,7 @@ const { Packet } = dns2;
 
 var end_time = Date.now() / 1000;
 
-const server = dns2.createServer((request, send, rinfo) => {
+const dns_server = dns2.createServer((request, send, rinfo) => {
 	const response = Packet.createResponseFromRequest(request);
 	const [ question ] = request.questions;
 	const { name } = question;
@@ -47,7 +48,7 @@ console.log('out of time ' + name);
 	});
 });
 
-server.listen(53);
+dns_server.listen(53);
 
 const http = require('http');
 
@@ -83,7 +84,7 @@ function process_query(query, res) {
 		res.end();
 }
 
-http.createServer(function (req, res) {
+var server = http.createServer(function (req, res) {
 	if (req.method == 'POST') {
 		var body = '';
 
@@ -96,5 +97,41 @@ http.createServer(function (req, res) {
 		process_query(req.url, res);
 	}
 }).listen(8080);
+
+server.on('connect', function (req, socket, bodyhead) {
+	var url = new URL('https://' + req.url);
+
+	var proxy_socket = new net.Socket();
+	proxy_socket.connect(url.port || 443, url.hostname, function () {
+			proxy_socket.write(bodyhead);
+			socket.write("HTTP/" + req.httpVersion + " 200 Connection established\r\n\r\n");
+		}
+	);
+
+	proxy_socket.on('data', function (chunk) {
+		socket.write(chunk);
+	});
+
+	proxy_socket.on('end', function () {
+		socket.end();
+	});
+
+	proxy_socket.on('error', function () {
+		socket.write("HTTP/" + req.httpVersion + " 500 Connection error\r\n\r\n");
+		socket.end();
+	});
+
+	socket.on('data', function (chunk) {
+		proxy_socket.write(chunk);
+	});
+
+	socket.on('end', function () {
+		proxy_socket.end();
+	});
+
+	socket.on('error', function () {
+		proxy_socket.end();
+	});
+});
 
 /* vim: set ts=2 sw=2 tw=0 noet: */
