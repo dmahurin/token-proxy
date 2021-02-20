@@ -7,8 +7,40 @@ const dns = require('dns');
 const fs = require("fs");
 const ip = require("ip");
 
-const Token = require('./token.js');
+var Token;
+try { Token = require('/etc/token-proxy/token.js'); }
+catch(e) { Token = require('./token.js'); }
+var config;
+try { config = require('/etc/token-proxy/config.json'); }
+catch(e) { config = {}; }
+
 dns.setServers(['8.8.8.8']);
+
+function read_host_files(files) {
+	if(files === undefined) { return {}; }
+	var host_lookup = {};
+	for(var file of files) {
+		var lines = fs.readFileSync('/etc/token-proxy/' + file, 'utf8').split(/\r?\n/);
+		for (var line of lines) {
+			if(line.charAt(0) == '#') { continue; }
+			line = line.replace(/ *#.*/, '');
+			var host = line.split(' ');
+			if(host.length == 2) {
+				if(host[0] === '0.0.0.0') { host[0] = null; }
+				host_lookup[host[1]] = host[0];
+			} else if (host.length == 1) {
+				host_lookup[host[0]] = null;
+			} else {
+				console.log('unknown block host line ' + line);
+			}
+		}
+	}
+	return host_lookup;
+}
+
+config.block_hosts = read_host_files(config.block_hosts);
+config.token_block_hosts = read_host_files(config.token_block_hosts);
+config.hosts = read_host_files(config.hosts);
 
 const { Packet } = dns2;
 
@@ -18,33 +50,48 @@ const dns_server = dns2.createServer((request, send, rinfo) => {
 	const response = Packet.createResponseFromRequest(request);
 	const [ question ] = request.questions;
 	const { name } = question;
+
+	function reply(name, address) {
+		if(address) {
+			response.answers.push({
+				name,
+				type: Packet.TYPE.A,
+				class: Packet.CLASS.IN,
+				ttl: 300,
+				address: address
+			});
+			send(response);
+		} else {
+			response.header.rcode = 3;
+			send(response);
+		}
+	}
+
 	if(name == 'token') {
-		response.answers.push({
-			name,
-			type: Packet.TYPE.A,
-			class: Packet.CLASS.IN,
-			ttl: 300,
-			address: ip.address()
-		});
-		send(response);
+		reply(name, ip.address());
 		return;
 	}
-	if(Date.now() / 1000 > end_time) {
-console.log('out of time ' + name);
-		response.header.rcode = 3;
-		send(response);
-		return;
+	var address;
+	if (undefined !== (address = config.hosts[name])) {
+		reply(name, address);
+	}
+
+	var host_parts = name.split('.');
+	while(host_parts.length > 1) {
+		if(Date.now() / 1000 > end_time && null === (address = config.token_block_hosts[host_parts.join('.')])) {
+			console.log('out of time ' + name);
+			reply(name, address);
+			return;
+		} else if (null === (address = config.block_hosts[host_parts.join('.')])) {
+			console.log('blocked ' + name);
+			reply(name, address);
+			return;
+		}
+		host_parts.shift();
 	}
 
 	dns.resolve(name, (err, records) => {
-		response.answers.push({
-			name,
-			type: Packet.TYPE.A,
-			class: Packet.CLASS.IN,
-			ttl: 300,
-			address: records[0]
-		});
-		send(response);
+    reply(name, records !== undefined ? records[0] : null);
 	});
 });
 
@@ -100,6 +147,16 @@ var server = http.createServer(function (req, res) {
 
 server.on('connect', function (req, socket, bodyhead) {
 	var url = new URL('https://' + req.url);
+
+	var host_parts = url.hostname.split('.');
+	while(host_parts.length > 1) {
+		if(Date.now() / 1000 > end_time && config.token_block_hosts[host_parts.join('.')] === null ||
+			config.block_hosts[host_parts.join('.')] === null) {
+			console.log('block ' + url.hostname);
+			socket.end();
+		}
+		host_parts.shift();
+	}
 
 	var proxy_socket = new net.Socket();
 	proxy_socket.connect(url.port || 443, url.hostname, function () {
